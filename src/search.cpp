@@ -77,20 +77,44 @@ using SearchedList                  = ValueList<Move, SEARCHEDLIST_CAPACITY>;
 // (*Scaler) All tuned parameters at time controls shorter than
 // optimized for require verifications at longer time controls
 
+// Helper to find the most valuable piece of 'us' that is under attack.
+std::pair<PieceType, Square> get_threat_info(const Position& pos) {
+    const Color us = pos.side_to_move();
+    const Bitboard enemies = pos.pieces(~us);
+    
+    for (PieceType pt : {QUEEN, ROOK, BISHOP, KNIGHT, PAWN}) {
+        Bitboard pieces = pos.pieces(us, pt);
+        while (pieces) {
+            Square s = pop_lsb(pieces);
+            if (pos.attackers_to(s) & enemies) {
+                return {pt, s};
+            }
+        }
+    }
+    return {NO_PIECE_TYPE, SQ_NONE};
+}
+
 int correction_value(const Worker& w, const Position& pos, const Stack* const ss) {
     const Color us     = pos.side_to_move();
     const auto  m      = (ss - 1)->currentMove;
     const auto& shared = w.sharedHistory;
-    const int   pcv    = shared.pawn_correction_entry(pos).at(us).pawn;
-    const int   micv   = shared.minor_piece_correction_entry(pos).at(us).minor;
-    const int   wnpcv  = shared.nonpawn_correction_entry<WHITE>(pos).at(us).nonPawnWhite;
-    const int   bnpcv  = shared.nonpawn_correction_entry<BLACK>(pos).at(us).nonPawnBlack;
-    const int   cntcv =
+    
+    const int pcv   = shared.pawn_correction_entry(pos).at(us).pawn;
+    const int micv  = shared.minor_piece_correction_entry(pos).at(us).minor;
+    const int wnpcv = shared.nonpawn_correction_entry<WHITE>(pos).at(us).nonPawnWhite;
+    const int bnpcv = shared.nonpawn_correction_entry<BLACK>(pos).at(us).nonPawnBlack;
+    const int cntcv =
       m.is_ok() ? (*(ss - 2)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
                     + (*(ss - 4)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
                   : 8;
 
-    return 10347 * pcv + 8821 * micv + 11665 * (wnpcv + bnpcv) + 7841 * cntcv;
+    auto [threatType, threatSquare] = get_threat_info(pos);
+    int tcv = 0;
+    if (threatType != NO_PIECE_TYPE) {
+        tcv = shared.threat_correction_entry(pos)[us][threatType][threatSquare];
+    }
+
+    return 10347 * pcv + 8821 * micv + 11665 * (wnpcv + bnpcv) + 7841 * cntcv + 9000 * tcv;
 }
 
 // Add correctionHistory value to raw staticEval and guarantee evaluation
@@ -114,17 +138,20 @@ void update_correction_history(const Position& pos,
     shared.nonpawn_correction_entry<WHITE>(pos).at(us).nonPawnWhite << bonus * nonPawnWeight / 128;
     shared.nonpawn_correction_entry<BLACK>(pos).at(us).nonPawnBlack << bonus * nonPawnWeight / 128;
 
-    // Branchless: use mask to zero bonus when move is not ok
-    const int    mask   = int(m.is_ok());
-    const Square to     = m.to_sq_unchecked();
-    const Piece  pc     = pos.piece_on(to);
-    const int    bonus2 = (bonus * 127 / 128) * mask;
-    const int    bonus4 = (bonus * 59 / 128) * mask;
-    (*(ss - 2)->continuationCorrectionHistory)[pc][to] << bonus2;
-    (*(ss - 4)->continuationCorrectionHistory)[pc][to] << bonus4;
+    auto [threatType, threatSquare] = get_threat_info(pos);
+    if (threatType != NO_PIECE_TYPE) {
+        shared.threat_correction_entry(pos)[us][threatType][threatSquare] << bonus * 140 / 128;
+    }
+
+    if (m.is_ok())
+    {
+        const Square to = m.to_sq();
+        const Piece  pc = pos.piece_on(to);
+        (*(ss - 2)->continuationCorrectionHistory)[pc][to] << bonus * 127 / 128;
+        (*(ss - 4)->continuationCorrectionHistory)[pc][to] << bonus * 59 / 128;
+    }
 }
 
-// Add a small random component to draw evaluations to avoid 3-fold blindness
 Value value_draw(size_t nodes) { return VALUE_DRAW - 1 + Value(nodes & 0x2); }
 Value value_to_tt(Value v, int ply);
 Value value_from_tt(Value v, int ply, int r50c);
@@ -588,9 +615,9 @@ void Search::Worker::clear() {
     mainHistory.fill(mainHistoryDefault);
     captureHistory.fill(-689);
 
-    // Each thread is responsible for clearing their part of shared history
     sharedHistory.correctionHistory.clear_range(0, numaThreadIdx, numaTotal);
     sharedHistory.pawnHistory.clear_range(-1238, numaThreadIdx, numaTotal);
+    sharedHistory.threatHistory.clear_range(0, numaThreadIdx, numaTotal);
 
     ttMoveHistory = 0;
 
@@ -1195,7 +1222,7 @@ moves_loop:  // When in check, search starts here
 
         r += 714;  // Base reduction offset to compensate for other tweaks
         r -= moveCount * 73;
-        r -= std::abs(correctionValue) / 30370;
+        r -= std::abs(correctionValue) / 16384;
 
         // Increase reduction for cut nodes
         if (cutNode)

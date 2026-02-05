@@ -35,6 +35,7 @@
 
 namespace Stockfish {
 
+constexpr int THREAT_CORRHIST_SIZE = 1024;
 constexpr int PAWN_HISTORY_BASE_SIZE   = 8192;  // has to be a power of 2
 constexpr int UINT_16_HISTORY_SIZE     = std::numeric_limits<uint16_t>::max() + 1;
 constexpr int CORRHIST_BASE_SIZE       = UINT_16_HISTORY_SIZE;
@@ -162,6 +163,7 @@ enum CorrHistType {
     Minor,         // By color and positions of minor pieces (Knight, Bishop)
     NonPawn,       // By non-pawn material positions and color
     PieceTo,       // By [piece][to] move
+    Threat,        
     Continuation,  // Combined history of move pairs
 };
 
@@ -186,6 +188,11 @@ template<CorrHistType>
 struct CorrHistTypedef {
     using type =
       DynStats<Stats<std::int16_t, CORRECTION_HISTORY_LIMIT, COLOR_NB>, CORRHIST_BASE_SIZE>;
+};
+
+template<>
+struct CorrHistTypedef<Threat> {
+    using type = DynStats<AtomicStats<std::int16_t, CORRECTION_HISTORY_LIMIT, COLOR_NB, PIECE_TYPE_NB, SQUARE_NB>, THREAT_CORRHIST_SIZE>;
 };
 
 template<>
@@ -222,10 +229,12 @@ using TTMoveHistory = StatsEntry<std::int16_t, 8192>;
 struct SharedHistories {
     SharedHistories(size_t threadCount) :
         correctionHistory(threadCount),
-        pawnHistory(threadCount) {
+        pawnHistory(threadCount),
+        threatHistory(threadCount) { 
         assert((threadCount & (threadCount - 1)) == 0 && threadCount != 0);
         sizeMinus1         = correctionHistory.get_size() - 1;
         pawnHistSizeMinus1 = pawnHistory.get_size() - 1;
+        threatSizeMinus1   = threatHistory.get_size() - 1;
     }
 
     size_t get_size() const { return sizeMinus1 + 1; }
@@ -260,12 +269,19 @@ struct SharedHistories {
         return correctionHistory[pos.non_pawn_key(c) & sizeMinus1];
     }
 
+    auto& threat_correction_entry(const Position& pos) {
+        return threatHistory[pos.pawn_key() & threatSizeMinus1];
+    }
+    const auto& threat_correction_entry(const Position& pos) const {
+        return threatHistory[pos.pawn_key() & threatSizeMinus1];
+    }
+
     UnifiedCorrectionHistory correctionHistory;
     PawnHistory              pawnHistory;
-
+    CorrectionHistory<Threat> threatHistory;
 
    private:
-    size_t sizeMinus1, pawnHistSizeMinus1;
+    size_t sizeMinus1, pawnHistSizeMinus1, threatSizeMinus1;
 };
 
 }  // namespace Stockfish
